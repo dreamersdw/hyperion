@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -130,9 +131,12 @@ func (t *Task) Collect() map[string]DataPoints {
 	binary.BigEndian.PutUint32(startBytes, uint32(start))
 	binary.BigEndian.PutUint32(endBytes, uint32(end))
 
+	startrow := bytes.Join([][]byte{metricID, startBytes}, []byte{})
+	endrow := bytes.Join([][]byte{metricID, endBytes}, []byte{})
+
 	tableName, scan := "tsdb", &goh.TScan{
-		StartRow: append(metricID, startBytes...),
-		StopRow:  append(metricID, endBytes...),
+		StartRow: startrow,
+		StopRow:  endrow,
 		Columns:  []string{"t"},
 	}
 
@@ -144,7 +148,7 @@ func (t *Task) Collect() map[string]DataPoints {
 
 	defer client.ScannerClose(scanId)
 
-	timeSeries := make(map[string]DataPoints, 1500*10000)
+	timeSeries := make(map[string]DataPoints, 1000)
 
 	for _, rowResult := range data {
 		record, dps, err := rowToDataPoints(rowResult, client)
@@ -168,16 +172,16 @@ type AggResult struct {
 }
 
 type MetricAggResult struct {
-	metric string
-	tags   map[string]string
-	avg    float64
-	max    float64
-	min    float64
+	Metric string            `json:"metric"`
+	Tags   map[string]string `json:"tags"`
+	Avg    float64           `json:"avg"`
+	Max    float64           `json:"max"`
+	Min    float64           `json:"min"`
 }
 
 func (mr MetricAggResult) String() string {
 	return fmt.Sprintf("metric=%s, tags=%s avg=%f max=%f min=%f",
-		mr.metric, mr.tags, mr.avg, mr.max, mr.min)
+		mr.Metric, mr.Tags, mr.Avg, mr.Max, mr.Min)
 }
 
 func (t *Task) Execute() (mr []MetricAggResult) {
@@ -211,11 +215,11 @@ func (t *Task) Execute() (mr []MetricAggResult) {
 		}
 
 		mr = append(mr, MetricAggResult{
-			metric: string(metric),
-			avg:    value.avg,
-			max:    value.max,
-			min:    value.min,
-			tags:   tags,
+			Metric: string(metric),
+			Avg:    value.avg,
+			Max:    value.max,
+			Min:    value.min,
+			Tags:   tags,
 		})
 	}
 	return
@@ -236,7 +240,7 @@ func parseRow(row Text) (Record, error) {
 }
 
 func makeQuery(table string, column string) func([]byte, *goh.HClient) ([]byte, error) {
-	metaCache := make(map[string]string, 1000000)
+	metaCache := make(map[string]string, 1000)
 	return func(row []byte, client *goh.HClient) ([]byte, error) {
 		key := table + string(row) + column
 
