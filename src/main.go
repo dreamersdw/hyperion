@@ -2,17 +2,29 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/docopt/docopt-go"
 	"github.com/sdming/goh"
 	"github.com/sdming/goh/Hbase"
 )
+
+var (
+	thriftServer = "127.0.0.1:9090"
+)
+
+type HourSpan struct {
+	hour       int64
+	tags       map[string]string
+	datapoints []DataPoint
+}
 
 type Task struct {
 	start  int64
@@ -26,7 +38,15 @@ type DataPoint struct {
 	value     float64
 }
 
+type Record struct {
+	mid   Text
+	time  uint32
+	rtags Text
+}
+
 type DataPoints []DataPoint
+type RowResult *Hbase.TRowResult
+type Text []byte
 
 func (dps DataPoints) Avg() float64 {
 	if len(dps) == 0 {
@@ -66,14 +86,6 @@ func (dps DataPoints) Min() float64 {
 	}
 	return min
 }
-
-type HourSpan struct {
-	hour       int64
-	tags       map[string]string
-	datapoints []DataPoint
-}
-
-type RowResult *Hbase.TRowResult
 
 func rowToDataPoints(result RowResult, client *goh.HClient) (r Record, alldps DataPoints, err error) {
 	record, err := parseRow([]byte(result.Row))
@@ -155,7 +167,20 @@ type AggResult struct {
 	min float64
 }
 
-func (t *Task) Execute() {
+type MetricAggResult struct {
+	metric string
+	tags   map[string]string
+	avg    float64
+	max    float64
+	min    float64
+}
+
+func (mr MetricAggResult) String() string {
+	return fmt.Sprintf("metric=%s, tags=%s avg=%f max=%f min=%f",
+		mr.metric, mr.tags, mr.avg, mr.max, mr.min)
+}
+
+func (t *Task) Execute() (mr []MetricAggResult) {
 	ts := t.Collect()
 	result := make(map[string]AggResult)
 
@@ -174,7 +199,7 @@ func (t *Task) Execute() {
 		checkError(err)
 
 		rtags := bs[3:]
-		tags := []string{}
+		tags := map[string]string{}
 		for i := 0; i < len(bs)-6; i += 6 {
 			tagkID := rtags[i : i+3]
 			tagvID := rtags[i+3 : i+6]
@@ -182,25 +207,18 @@ func (t *Task) Execute() {
 			checkError(err)
 			tagv, err := queryTagv(tagvID, t.client)
 			checkError(err)
-			tags = append(tags, fmt.Sprintf("%s=%s", tagk, tagv))
+			tags[string(tagk)] = string(tagv)
 		}
 
-		fmt.Printf("metric=%s %s avg=%f min=%f max=%f\n",
-			metric,
-			strings.Join(tags, " "),
-			value.avg,
-			value.min,
-			value.max)
+		mr = append(mr, MetricAggResult{
+			metric: string(metric),
+			avg:    value.avg,
+			max:    value.max,
+			min:    value.min,
+			tags:   tags,
+		})
 	}
-}
-
-type Text []byte
-
-type Record struct {
-	mid   Text
-	time  uint32
-	rtags Text
-	// tags  map[string]string
+	return
 }
 
 func parseRow(row Text) (Record, error) {
@@ -209,19 +227,11 @@ func parseRow(row Text) (Record, error) {
 	}
 
 	rtags := row[7:]
-	// pairs := row[7:]
-	// tags := make(map[string]string, 4)
-	// for i := 0; i < len(pairs); i += 6 {
-	// 	tagk := string(pairs[i : i+3])
-	// 	tagv := string(pairs[i+3 : i+6])
-	// 	tags[tagk] = tagv
-	// }
 
 	return Record{
 		mid:   row[:3],
 		time:  uint32(row[3])<<24 | uint32(row[4])<<16 | uint32(row[5])<<8 | uint32(row[6]),
 		rtags: rtags,
-		// tags: tags,
 	}, nil
 }
 
@@ -374,7 +384,7 @@ const (
 	version = "0.1.0"
 	usage   = `Usage:
 	hyperion query [--thrift=ADDR] [METRIC] [DAY]
-    hyperion server [--thrift=ADDR] [--port=PORT]
+	hyperion server [--thrift=ADDR] [--port=PORT]
 	hyperion version
 	hyperion help
 
@@ -382,6 +392,23 @@ Example:
     hypersion query sys.cpu.usage 2015-02-03
 	`
 )
+
+func handleQuery(w http.ResponseWriter, r *http.Request) {
+	metric := r.FormValue("metric")
+	day := r.FormValue("day")
+	t := NewTask(thriftServer, metric, day)
+	mr := t.Execute()
+	for _, m := range mr {
+		fmt.Println(m.String())
+	}
+
+	bytes, err := json.Marshal(mr)
+	if err != nil {
+		w.Write([]byte(err.Error()))
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	w.Write(bytes)
+}
 
 func main() {
 	opt, err := docopt.Parse(usage, nil, false, "", false, false)
@@ -417,10 +444,22 @@ func main() {
 		}
 
 		t := NewTask(thriftServer, metric, day)
-		t.Execute()
+		mr := t.Execute()
+		for _, m := range mr {
+			fmt.Println(m.String())
+		}
 		return
 	}
 
 	if opt["server"].(bool) {
+		var port int64 = 42421
+		if opt["--port"] != nil {
+			strPort := opt["--port"].(string)
+			port, err = strconv.ParseInt(strPort, 10, 32)
+			checkError(err)
+		}
+		address := fmt.Sprintf("0.0.0.0:%d", port)
+		http.HandleFunc("/api/metric/daily", handleQuery)
+		http.ListenAndServe(address, nil)
 	}
 }
