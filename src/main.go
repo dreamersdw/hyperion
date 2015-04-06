@@ -13,12 +13,16 @@ import (
 	"time"
 
 	"github.com/docopt/docopt-go"
+	"github.com/op/go-logging"
 	"github.com/sdming/goh"
 	"github.com/sdming/goh/Hbase"
 )
 
 var (
 	thriftServer = "127.0.0.1:9090"
+	log          = logging.MustGetLogger("main")
+	format       = logging.MustStringFormatter(
+		"%{color}%{time:15:04:05.000} - %{level:.4s} %{color:reset} %{message}")
 )
 
 type HourSpan struct {
@@ -379,8 +383,8 @@ func parseDataPoint(hourTime uint32, column string, rawValue []byte) (dps []Data
 
 func checkError(err error) {
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(2)
+		log.Error(fmt.Sprintf("%s", err))
+		panic(err)
 	}
 }
 
@@ -412,6 +416,14 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 	w.Write(bytes)
+}
+
+func setupLogging() {
+	basicBackend := logging.NewLogBackend(os.Stdout, "", 1)
+	formatedBackend := logging.NewBackendFormatter(basicBackend, format)
+	leveledBackend := logging.SetBackend(formatedBackend)
+	leveledBackend.SetLevel(logging.INFO, "")
+	logging.SetBackend(leveledBackend)
 }
 
 func main() {
